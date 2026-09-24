@@ -1,0 +1,240 @@
+'use strict';
+/**
+ * opencode-project-knowledge — install-hooks.js
+ * Fully-local automation triggers. No network, no commits, no tracking.
+ *
+ * Installs into machine-local locations ONLY:
+ *   - <repo>/.git/hooks/{post-commit,post-merge,post-checkout} shims that run
+ *     `node <engine>/mechanical.js <root> --quiet` (+ `refresh.js --mark-only`),
+ *     chaining (never clobbering) any pre-existing hook.
+ *   - optional daily schedule: schtasks (win32) or cron (POSIX), current user.
+ *
+ * .git/hooks is never tracked by git, so hooks stay local by construction.
+ * Hook bodies resolve the engine dir at install time (absolute path) — the
+ * installing machine's location, which is exactly where hooks execute.
+ *
+ * CLI:
+ *   node install-hooks.js <repoRoot> [--schedule[=full]] [--no-hooks] [--uninstall] [--json]
+ *   --schedule       daily mechanical run (deterministic, cheap)
+ *   --schedule=full  daily mechanical + weekly auto-sync (incl. gated agent pass)
+ * Exit codes: 0 ok, 1 bad usage, 2 repo not found.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execSync, execFileSync } = require('child_process');
+
+const ENGINE_DIR = __dirname;
+const HOOK_NAMES = ['post-commit', 'post-merge', 'post-checkout'];
+const MARKER = 'opencode-project-knowledge local automation';
+
+function hookBody(engineDir, root) {
+  const eng = engineDir.replace(/"/g, '');
+  const rt = root.replace(/"/g, '');
+  const inner = process.platform === 'win32'
+    // Git for Windows executes hooks via sh.exe (shebang required); delegate to powershell for node.
+    ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path '.project') { try { & node \\"${eng}/mechanical.js\\" \\"${rt}\\" --quiet } catch {}; try { & node \\"${eng}/refresh.js\\" \\"${rt}\\" --mark-only } catch {} }"`
+    : `node "${eng}/mechanical.js" "${rt}" --quiet >/dev/null 2>&1 || true\nnode "${eng}/refresh.js" "${rt}" --mark-only >/dev/null 2>&1 || true`;
+  return `#!/bin/sh\n# ${MARKER} (installed ${new Date().toISOString()} - local only, safe to delete)\n` +
+    `[ -d ".project" ] || exit 0\n` +
+    `${inner} >/dev/null 2>&1 || true\n` +
+    `exit 0\n`;
+}
+
+function isOurs(p) {
+  try { return fs.readFileSync(p, 'utf8').includes(MARKER); }
+  catch { return false; }
+}
+
+function installHooks(root) {
+  const hooksDir = path.join(root, '.git', 'hooks');
+  if (!fs.existsSync(path.join(root, '.git'))) {
+    return { installed: [], skipped: 'no .git directory (not a git repo)' };
+  }
+  if (!fs.existsSync(hooksDir)) fs.mkdirSync(hooksDir, { recursive: true });
+  const installed = [];
+  const chained = [];
+  for (const name of HOOK_NAMES) {
+    const p = path.join(hooksDir, name);
+    if (fs.existsSync(p) && !isOurs(p)) {
+      // Chain: keep the user's hook, call it first, then run ours.
+      const prev = fs.readFileSync(p, 'utf8');
+      const ours = hookBody(ENGINE_DIR, root);
+      const fragment = ours.split('\n').filter((l) => !/^#!/.test(l) && !l.startsWith('# ') && l.trim() !== 'exit 0').join('\n');
+      const chainedBody = prev.replace(/\s+$/, '') +
+        `\n\n# --- ${MARKER}: chained after pre-existing hook ---\n` + fragment + '\n';
+      fs.copyFileSync(p, `${p}.pk-bak`);
+      fs.writeFileSync(p, chainedBody, { mode: 0o755 });
+      chained.push(name);
+    } else {
+      fs.writeFileSync(p, hookBody(ENGINE_DIR, root), { mode: 0o755 });
+      installed.push(name);
+    }
+  }
+  try { execFileSync('git', ['config', 'core.hooksPath', '.git/hooks'], { cwd: root, stdio: 'ignore' }); } catch { /* optional */ }
+  return { installed, chained };
+}
+
+function uninstallHooks(root) {
+  const hooksDir = path.join(root, '.git', 'hooks');
+  const removed = [];
+  const restored = [];
+  const kept = [];
+  for (const name of HOOK_NAMES) {
+    const p = path.join(hooksDir, name);
+    if (!fs.existsSync(p)) continue;
+    const content = fs.readFileSync(p, 'utf8');
+    if (!content.includes(MARKER)) { kept.push(name); continue; }
+    const bak = `${p}.pk-bak`;
+    if (fs.existsSync(bak) && content.includes('chained after pre-existing hook')) {
+      fs.copyFileSync(bak, p);
+      fs.unlinkSync(bak);
+      restored.push(name);
+    } else {
+      fs.unlinkSync(p);
+      removed.push(name);
+    }
+  }
+  return { removed, restored, kept };
+}
+
+function taskNameFor(root, suffix) {
+  const base = path.basename(path.resolve(root)).replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 40);
+  return `PK-Knowledge-${base}${suffix ? `-${suffix}` : ''}`;
+}
+
+// Scheduler commands go through a generated wrapper inside .project/state/
+// (local-only, regenerated on every install) so schtasks/cron never have to
+// parse nested quotes — the #1 cause of silent schedule failures.
+function writeScheduleWrapper(root, kind, script) {
+  const dir = path.join(root, '.project', 'state');
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `scheduled-${kind}.cmd`);
+  const body =
+    `@rem GENERATED by opencode-project-knowledge install-hooks.js — do not hand-edit; re-run install to update.\r\n` +
+    `@"${process.execPath}" "${script}" "${root}" --quiet >> "${path.join(root, '.project', 'state', 'auto.log')}" 2>&1\r\n`;
+  fs.writeFileSync(p, body);
+  return p;
+}
+
+function registerDaily(root, name, targetArgs, log) {
+  const nodeExe = process.execPath;
+  void log;
+  if (process.platform === 'win32') {
+    const wrapper = writeScheduleWrapper(root, 'daily', targetArgs);
+    execSync(`schtasks /Create /TN "${name}" /TR "\\"${wrapper}\\"" /SC DAILY /ST 02:30 /F`, { stdio: 'pipe' });
+    return `schtasks daily 02:30 (${name})`;
+  }
+  const line = `30 2 * * * "${nodeExe}" "${targetArgs}" "${root}" --quiet >> "${log}" 2>&1 # ${MARKER}`;
+  let tab = '';
+  try { tab = execSync('crontab -l', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { tab = ''; }
+  const lines = tab.split('\n').filter((l) => l.trim() && !l.includes(`${targetArgs}`));
+  lines.push(line);
+  execSync('crontab -', { input: lines.join('\n') + '\n', encoding: 'utf8', stdio: ['pipe', 'ignore', 'ignore'] });
+  return 'cron daily 02:30';
+}
+
+function registerWeekly(root, name, script, log) {
+  const nodeExe = process.execPath;
+  void log;
+  if (process.platform === 'win32') {
+    const wrapper = writeScheduleWrapper(root, 'weekly', script);
+    execSync(`schtasks /Create /TN "${name}" /TR "\\"${wrapper}\\"" /SC WEEKLY /D SUN /ST 03:30 /F`, { stdio: 'pipe' });
+    return `schtasks weekly Sun 03:30 (${name})`;
+  }
+  const line = `30 3 * * 0 "${nodeExe}" "${script}" "${root}" --quiet >> "${log}" 2>&1 # ${MARKER}`;
+  let tab = '';
+  try { tab = execSync('crontab -l', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { tab = ''; }
+  const lines = tab.split('\n').filter((l) => l.trim() && !l.includes(`${script}`));
+  lines.push(line);
+  execSync('crontab -', { input: lines.join('\n') + '\n', encoding: 'utf8', stdio: ['pipe', 'ignore', 'ignore'] });
+  return 'cron weekly Sun 03:30';
+}
+
+function installSchedule(root, mode) {
+  const mech = path.join(ENGINE_DIR, 'mechanical.js');
+  const auto = path.join(ENGINE_DIR, 'auto-sync.js');
+  const log = path.join(root, '.project', 'state', 'auto.log');
+  const out = {};
+  try {
+    out.mechanical = registerDaily(root, taskNameFor(root, 'daily'), mech, log);
+    if (mode === 'full') {
+      out.agent = registerWeekly(root, taskNameFor(root, 'weekly'), auto, log);
+    }
+    return out;
+  } catch (e) {
+    return { error: `scheduler failed (needs interactive session?): ${String((e && e.message) || e).slice(0, 200)} — git hooks still work` };
+  }
+}
+
+function uninstallSchedule(root) {
+  const names = [taskNameFor(root, 'daily'), taskNameFor(root, ''), taskNameFor(root, 'weekly')];
+  if (process.platform === 'win32') {
+    let removed = false;
+    for (const n of names) {
+      try { execSync(`schtasks /Delete /TN "${n}" /F`, { stdio: 'pipe' }); removed = true; } catch { /* absent */ }
+    }
+    return { removed };
+  }
+  try {
+    let tab = '';
+    try { tab = execSync('crontab -l', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return { removed: false }; }
+    const kept = tab.split('\n').filter((l) => !l.includes(MARKER));
+    if (kept.join('\n') !== tab) {
+      execSync('crontab -', { input: kept.join('\n'), encoding: 'utf8', stdio: ['pipe', 'ignore', 'ignore'] });
+      return { removed: true };
+    }
+    return { removed: false };
+  } catch { return { removed: false }; }
+}
+
+if (require.main === module) {
+  const root = process.argv[2];
+  const asJson = process.argv.includes('--json');
+  const out = (obj) => console.log(asJson ? JSON.stringify(obj, null, 2) : obj.text);
+  if (!root || root === '--help' || root === '-h') {
+    console.error('Usage: node install-hooks.js <repoRoot> [--schedule] [--no-hooks] [--uninstall] [--json]');
+    process.exit(1);
+  }
+  const abs = path.resolve(root);
+  if (!fs.existsSync(abs)) { console.error(`Repository not found: ${abs}`); process.exit(2); }
+  const lines = [];
+  let result = { root: abs };
+  try {
+    if (process.argv.includes('--uninstall')) {
+      result.hooks = uninstallHooks(abs);
+      result.schedule = uninstallSchedule(abs);
+      lines.push(`uninstalled local automation for ${abs}`);
+      lines.push(`hooks removed: ${result.hooks.removed.join(', ') || '(none)'}; restored: ${result.hooks.restored.join(', ') || '(none)'}; kept (not ours): ${result.hooks.kept.join(', ') || '(none)'}`);
+    } else {
+      if (process.argv.includes('--no-hooks')) {
+        result.hooks = { installed: [], chained: [], skipped: '--no-hooks' };
+        lines.push('hooks skipped (--no-hooks)');
+      } else {
+        result.hooks = installHooks(abs);
+        if (result.hooks.skipped) lines.push(`hooks skipped: ${result.hooks.skipped}`);
+        else {
+          lines.push(`hooks installed: ${result.hooks.installed.join(', ') || '(none new)'}`);
+          if (result.hooks.chained.length) lines.push(`chained after pre-existing: ${result.hooks.chained.join(', ')} (originals backed up to *.pk-bak)`);
+        }
+      }
+      if (process.argv.some((a) => a === '--schedule' || a.startsWith('--schedule='))) {
+        const full = process.argv.some((a) => a === '--schedule=full');
+        result.schedule = installSchedule(abs, full ? 'full' : 'daily');
+        const bits = [];
+        if (result.schedule.mechanical) bits.push(`mechanical: ${result.schedule.mechanical}`);
+        if (result.schedule.agent) bits.push(`agent: ${result.schedule.agent}`);
+        lines.push(result.schedule.error ? `schedule skipped: ${result.schedule.error}` : `scheduled: ${bits.join(' + ')}`);
+      }
+      lines.push('All automation is machine-local: .git/hooks (untracked) + scheduler (local machine). Nothing is committed or pushed.');
+    }
+    result.text = lines.join('\n');
+    out(result);
+  } catch (e) {
+    console.error(String((e && e.message) || e));
+    process.exit(1);
+  }
+}
+
+module.exports = { installHooks, uninstallHooks, installSchedule, uninstallSchedule };

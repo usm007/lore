@@ -1,0 +1,20 @@
+{
+  "name": "lore",
+  "version": "1.4.0",
+  "description": "OpenCode plugin: compact project knowledge context for any repository.",
+  "main": "./plugins/project-knowledge.mjs",
+  "exports": {
+    ".": "./plugins/project-knowledge.mjs",
+    "./plugin": "./plugins/project-knowledge.mjs"
+  },
+  "files": [
+    "plugins/",
+    "project-knowledge/",
+    "commands/",
+    "README.md"
+  ],
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.15"
+  },
+  "license": "MIT"
+}

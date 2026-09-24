@@ -1,0 +1,15 @@
+{
+  "project": "{{PROJECT_NAME}}",
+  "version": "0.1.0",
+  "tool": "opencode-project-knowledge",
+  "toolVersion": "{{TOOL_VERSION}}",
+  "generatedAt": "{{DATE_ISO}}",
+  "baseline": { "commit": null, "timestamp": "{{DATE_ISO}}", "fileCount": 0 },
+  "detection": { "primary": "unknown", "languages": [], "mixed": false, "frameworks": [] },
+  "architecture": "unknown — verify against source",
+  "manifests": [],
+  "entryPoints": [],
+  "topDirs": [],
+  "lowConfidence": ["project-type"],
+  "filesSample": []
+}
