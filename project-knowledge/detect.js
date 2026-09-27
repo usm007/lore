@@ -45,7 +45,6 @@ const MARKERS = [
   { file: 'settings.gradle', type: 'java', weight: 3 },
   { file: 'src/main/java', type: 'java', weight: 3, dir: true },
   { file: 'AndroidManifest.xml', type: 'android', weight: 5 },
-  { file: 'build.gradle', type: 'android', weight: 2 },
   { file: 'go.mod', type: 'go', weight: 5 },
   { file: 'go.sum', type: 'go', weight: 3 },
   { file: 'Cargo.toml', type: 'rust', weight: 5 },
@@ -55,7 +54,9 @@ const MARKERS = [
   { file: 'CMakeLists.txt', type: 'cpp', weight: 4 },
   { file: 'Makefile', type: 'c', weight: 2 },
   { file: 'configure.ac', type: 'c', weight: 3 },
-  { file: '.csproj', type: 'csharp', weight: 0, suffix: true },
+  { file: '.csproj', type: 'csharp', weight: 4, suffix: true },
+  { file: '.fsproj', type: 'csharp', weight: 4, suffix: true },
+  { file: '.vbproj', type: 'csharp', weight: 4, suffix: true },
   { file: '.sln', type: 'dotnet', weight: 5, suffix: true },
   { file: 'global.json', type: 'dotnet', weight: 4 },
   { file: 'Directory.Build.props', type: 'dotnet', weight: 3 },
@@ -77,8 +78,8 @@ const EXT_MAP = {
   '.vue': 'vue',
   '.cs': 'csharp',
   '.java': 'java',
-  '.kt': 'android',
-  '.kts': 'android',
+  '.kt': 'java',
+  '.kts': 'java',
   '.go': 'go',
   '.rs': 'rust',
   '.php': 'php',
@@ -179,22 +180,30 @@ function detect(root) {
 
   for (const m of MARKERS) {
     if (m.suffix) {
-      if (suffixMatch(entries, m.file)) add(m.type, m.file === '.sln' ? 5 : 4, `*${m.file} present`);
+      if (suffixMatch(entries, m.file)) add(m.type, m.weight, `*${m.file} present`);
     } else if (exists(abs, m.file, m.dir)) {
       if (m.weight > 0) add(m.type, m.weight, `${m.file} present`);
     }
   }
-  // .csproj scan one level deep (src/*/*.csproj common in dotnet)
+  // Project-file scan two levels deep (src/*/*.csproj, src/a/b/*.csproj common in dotnet)
   if (!scores.csharp && !scores.dotnet) {
-    for (const e of entries) {
-      if (e.isDirectory() && !EXCLUDE_DIRS.has(e.name)) {
-        try {
-          const sub = fs.readdirSync(path.join(abs, e.name));
-          if (sub.some((f) => f.endsWith('.csproj') || f.endsWith('.sln'))) {
-            add('dotnet', 4, `${e.name}/*.csproj|*.sln present`);
-            break;
-          }
-        } catch { /* ignore */ }
+    const projExts = ['.csproj', '.fsproj', '.vbproj', '.sln'];
+    const stack = [{ dir: abs, depth: 0 }];
+    while (stack.length) {
+      const { dir, depth } = stack.pop();
+      if (depth > 2) continue;
+      let sub;
+      try { sub = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch { continue; }
+      for (const e of sub) {
+        if (e.isFile() && projExts.some((ext) => e.name.endsWith(ext))) {
+          add('dotnet', 4, `${path.relative(abs, path.join(dir, e.name)).replace(/\\/g, '/')} present`);
+          stack.length = 0;
+          break;
+        }
+        if (e.isDirectory() && depth < 2 && !EXCLUDE_DIRS.has(e.name) && !e.name.startsWith('.')) {
+          stack.push({ dir: path.join(dir, e.name), depth: depth + 1 });
+        }
       }
     }
   }
@@ -211,8 +220,8 @@ function detect(root) {
         else if (f === 'angular') add('angular', 4, 'package.json depends on @angular/core');
         else if (f === 'electron') add('electron', 5, 'package.json depends on electron');
       }
-      if (pkg.scripts && pkg.scripts.dev && /electron/i.test(JSON.stringify(pkg))) {
-        add('electron', 2, 'package.json references electron');
+      if (pkg.scripts && pkg.scripts.dev && /electron/i.test(`${pkg.scripts.dev} ${pkg.main || ''}`)) {
+        add('electron', 2, 'package.json dev/main references electron');
       }
     }
   }
@@ -224,9 +233,10 @@ function detect(root) {
   }
   // Extension evidence (lower weight than manifests)
   const extWeight = { python: 1, javascript: 1, typescript: 1, react: 1, vue: 2, csharp: 1, java: 1, go: 1, rust: 1, php: 1, c: 1, cpp: 1, android: 1 };
+  const hadScores = Object.keys(scores).length > 0;
   for (const [lang, n] of Object.entries(langTotals)) {
     if (n >= 2) add(lang, Math.min(3, (extWeight[lang] || 1) + (n >= 10 ? 1 : 0)), `${n} *.${lang} source files`);
-    else if (n === 1 && !Object.keys(scores).length) add(lang, 1, `single ${lang} source file`);
+    else if (n === 1 && !hadScores) add(lang, 1, `single ${lang} source file`);
   }
 
   // Normalise: electron implies node; vue/react imply js/ts base

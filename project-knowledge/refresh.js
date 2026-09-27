@@ -16,9 +16,12 @@ const { execSync } = require('child_process');
 const { detect } = require('./detect');
 
 const MEANINGFUL = [
-  /\bpackage\.json$/, /\bpyproject\.toml$/, /\brequirements\.txt$/, /\bgo\.mod$/, /\bCargo\.toml$/,
-  /\bcomposer\.json$/, /\bpom\.xml$/, /\bbuild\.gradle(\.kts)?$/, /\.sln$/, /\.csproj$/,
-  /\btsconfig\.json$/, /\bvite\.config\./, /\bDockerfile$/,
+  /\bpackage\.json$/, /\bpackage-lock\.json$/, /\bpnpm-workspace\.yaml$/, /\byarn\.lock$/,
+  /\bpyproject\.toml$/, /\brequirements\.txt$/, /\bPipfile$/, /\bpoetry\.lock$/,
+  /\bgo\.mod$/, /\bgo\.sum$/, /\bCargo\.toml$/, /\bCargo\.lock$/,
+  /\bcomposer\.json$/, /\bpom\.xml$/, /\bbuild\.gradle(\.kts)?$/, /\.sln$/, /\.csproj$/, /\.fsproj$/, /\.vbproj$/,
+  /\bGemfile$/, /\bpubspec\.yaml$/, /\bDockerfile$/, /\bdocker-compose.*\.yml$/,
+  /\btsconfig\.json$/, /\bvite\.config\./,
 ];
 
 function unquote(p) {
@@ -74,10 +77,21 @@ function filterIgnored(root, paths) {
 }
 
 function gitChangedFiles(root) {
+  return gitChangedDetail(root).files;
+}
+
+function gitChangedDetail(root) {
   const out = gitPorcelain(root);
-  if (out === null) return [];
+  if (out === null) return { files: [], structural: false, renamed: false, untracked: [] };
   const { tracked, untracked } = parsePorcelain(out);
-  return tracked.concat(filterIgnored(root, untracked));
+  const renamed = /^\s*R[ M]/m.test(out);
+  const keptUntracked = filterIgnored(root, untracked);
+  return {
+    files: tracked.concat(keptUntracked),
+    structural: keptUntracked.length > 0 || renamed,
+    renamed,
+    untracked: keptUntracked,
+  };
 }
 
 function moduleOf(f) {
@@ -90,8 +104,9 @@ function classify(files) {
   const meaningful = [];
   const skipped = [];
   for (const f of files) {
-    if (/(^|\/)(dist|build|out|target|node_modules|vendor|bin|obj|coverage|__pycache__|\.git)(\/|$)/.test(f)) { skipped.push(f); continue; }
-    if (/\.(png|jpg|jpeg|gif|ico|pdf|zip|exe|dll|so|woff2?|ttf)$/i.test(f)) { skipped.push(f); continue; }
+    const norm = String(f).replace(/\\/g, '/');
+    if (/(^|\/)(dist|build|out|target|node_modules|vendor|bin|obj|coverage|__pycache__|\.venv|venv|\.tox|\.next|\.nuxt|\.expo|Pods|\.gradle|\.idea|\.vscode|\.project|\.opencode|\.agents|\.claude|\.git)(\/|$)/.test(norm)) { skipped.push(f); continue; }
+    if (/\.(png|jpg|jpeg|gif|ico|pdf|zip|tar|gz|exe|dll|so|dylib|bin|dat|mp4|mov|woff2?|ttf|eot)$/i.test(norm)) { skipped.push(f); continue; }
     meaningful.push(f);
   }
   return { meaningful, skipped };
@@ -122,7 +137,16 @@ function refreshInner(abs, opts = {}) {
     cleanStaleTmpSync(path.join(abs, '.project', 'state'));
   }
   const detection = detect(abs);
-  let files = opts.files || gitChangedFiles(abs);
+  let files;
+  let structuralHint = false;
+  if (opts.files) {
+    files = opts.files;
+    structuralHint = false;
+  } else {
+    const detail = gitChangedDetail(abs);
+    files = detail.files;
+    structuralHint = detail.structural;
+  }
   const { meaningful, skipped } = classify(files);
   const modules = [...new Set(meaningful.map(moduleOf))];
 
@@ -134,10 +158,14 @@ function refreshInner(abs, opts = {}) {
   if (!Array.isArray(stale.stale)) stale.stale = [];
 
   const configTouched = meaningful.some((f) => MEANINGFUL.some((re) => re.test(f)));
-  const structural = meaningful.some((f) => {
-    // new/deleted files are structural; git porcelain already encodes renames as "R  old -> new"
-    return true;
+  // Structural = new/deleted/renamed files (untracked or rename in porcelain),
+  // or a top-level dir not yet in the knowledge baseline.
+  const knownTops = new Set(((kj && kj.topDirs) || []).map((t) => String(t.dir || t)));
+  const newTopDir = meaningful.some((f) => {
+    const top = moduleOf(f);
+    return top !== '(root)' && kj && !knownTops.has(top);
   });
+  const structural = structuralHint || newTopDir;
 
   const actions = [];
   if (opts.clear) {
@@ -200,4 +228,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { refresh, parsePorcelain, classify };
+module.exports = { refresh, parsePorcelain, classify, gitChangedFiles, gitChangedDetail };

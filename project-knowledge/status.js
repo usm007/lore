@@ -19,7 +19,7 @@ function gitChanged(root) {
     const out = execSync('git status --porcelain', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const { parsePorcelain } = require('./refresh');
     const { tracked, untracked } = parsePorcelain(out);
-    return tracked.concat(untracked.map((f) => `?? ${f}`)).slice(0, 50);
+    return tracked.concat(untracked).slice(0, 50);
   } catch { return null; } // git unavailable -> null (graceful)
 }
 
@@ -36,13 +36,19 @@ function status(root) {
   const stale = readJson(path.join(pj, 'state', 'stale.json'));
   const missing = expectedDocs().filter((d) => !fs.existsSync(path.join(pj, d)));
   const malformed = (kj && kj.__error && kj.__error !== 'missing') ? kj.__error : null;
+  const staleMalformed = (stale && stale.__error && stale.__error !== 'missing') ? stale.__error : null;
   const changed = gitChanged(abs);
 
   let age = 'no baseline';
-  if (kj && kj.generatedAt) {
-    const days = Math.max(0, Math.floor((Date.now() - Date.parse(kj.generatedAt)) / 86400000));
-    age = `${kj.generatedAt} (~${days}d ago)`;
+  const stamp = (kj && kj.baseline && kj.baseline.timestamp) || (kj && kj.generatedAt);
+  if (stamp) {
+    const ms = Date.parse(stamp);
+    age = Number.isFinite(ms)
+      ? `${stamp} (~${Math.max(0, Math.floor((Date.now() - ms) / 86400000))}d ago)`
+      : `${stamp} (unknown age)`;
   }
+  const staleSections = (stale && Array.isArray(stale.stale)) ? stale.stale
+    : (stale && Array.isArray(stale.affected)) ? stale.affected : [];
   return {
     root: abs,
     projectType: detection.primary,
@@ -51,10 +57,11 @@ function status(root) {
     knowledgeAge: age,
     baseline: (kj && kj.baseline) || null,
     changedFiles: changed, // null => git unavailable
-    staleSections: (stale && stale.stale) || [],
+    staleSections,
     missingKnowledge: missing,
     lowConfidence: (kj && kj.lowConfidence) || [],
     malformed,
+    staleMalformed,
     hasKnowledge: fs.existsSync(path.join(pj, 'overview.md')) || fs.existsSync(path.join(pj, 'knowledge.json')),
   };
 }
@@ -71,6 +78,7 @@ function render(s) {
   L.push(`low-confidence: ${s.lowConfidence.length ? s.lowConfidence.join(', ') : 'none'}`);
   L.push(`missing knowledge: ${s.missingKnowledge.length ? s.missingKnowledge.join(', ') : 'none'}`);
   if (s.malformed) L.push(`malformed: knowledge.json: ${s.malformed}`);
+  if (s.staleMalformed) L.push(`malformed: state/stale.json: ${s.staleMalformed}`);
   return L.join('\n');
 }
 

@@ -1,16 +1,26 @@
 {
   "name": "lore",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "OpenCode plugin: compact project knowledge context for any repository.",
   "main": "./plugins/project-knowledge.mjs",
   "exports": {
     ".": "./plugins/project-knowledge.mjs",
     "./plugin": "./plugins/project-knowledge.mjs"
   },
+  "bin": {
+    "pk-status": "./project-knowledge/status.js",
+    "pk-refresh": "./project-knowledge/refresh.js",
+    "pk-mechanical": "./project-knowledge/mechanical.js",
+    "pk-bootstrap": "./project-knowledge/bootstrap.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
   "files": [
     "plugins/",
     "project-knowledge/",
     "commands/",
+    "tests/",
     "README.md"
   ],
   "dependencies": {

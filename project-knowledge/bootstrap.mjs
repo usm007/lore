@@ -34,6 +34,7 @@ const VERSION = readVersion();
 function readVersion() {
   try {
     const candidates = [
+      new URL('./VERSION', import.meta.url),
       new URL('../VERSION', import.meta.url),
       new URL('../../VERSION', import.meta.url),
     ];
@@ -106,12 +107,27 @@ function walk(root, pats, max = 600) {
   return files;
 }
 
+function gitDirFor(root) {
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync('git rev-parse --git-dir', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (out) return path.isAbsolute(out) ? out : path.join(root, out);
+  } catch { /* not a git repo or git unavailable */ }
+  return path.join(root, '.git');
+}
+
 function gitHead(root) {
   try {
-    const head = fs.readFileSync(path.join(root, '.git', 'HEAD'), 'utf8').trim();
+    const { execSync } = require('child_process');
+    const out = execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (out) return out.slice(0, 40);
+  } catch { /* fall back to file read */ }
+  try {
+    const gitDir = gitDirFor(root);
+    const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
     const m = head.match(/^ref:\s*(.+)$/);
     if (m) {
-      try { return fs.readFileSync(path.join(root, '.git', m[1].trim()), 'utf8').trim().slice(0, 40); }
+      try { return fs.readFileSync(path.join(gitDir, m[1].trim()), 'utf8').trim().slice(0, 40); }
       catch { return null; }
     }
     return head.slice(0, 40);
@@ -169,7 +185,7 @@ export function bootstrap(root, opts = {}) {
     throw err;
   }
   if (opts.dryRun) return bootstrapInner(abs, opts); // no writes -> no lock needed
-  return withLockSync(path.join(abs, '.project', '.lock'), () => bootstrapInner(abs, opts), { timeoutMs: 60000 });
+  return withLockSync(path.join(abs, '.project', '.lock'), () => bootstrapInner(abs, opts), { timeoutMs: 120000, staleMs: 120000 });
 }
 
 function bootstrapInner(abs, opts = {}) {
@@ -293,13 +309,33 @@ function bootstrapInner(abs, opts = {}) {
     }
   } else skipped.push('state/stale.json');
 
-  // AGENTS.md at repo root — only when missing (never overwrite)
+  // AGENTS.md at repo root — only when missing (never overwrite).
+  // Matches project-knowledge/templates/AGENTS.md sections; FACT rows are
+  // pre-filled from detection, (agent) rows need source verification.
   let agentsCreated = false;
   const agentsPath = path.join(abs, 'AGENTS.md');
   if (!fs.existsSync(agentsPath)) {
+    const oneLiner = `${ctx.primary}${ctx.mixed ? ` (mixed: ${ctx.languages.join(', ')})` : ''}${ctx.frameworks.length ? ` / ${ctx.frameworks.join(', ')}` : ''} — ${ctx.archGuess}`;
+    const agentsBody =
+      `# AGENTS.md — ${name}\n\n${oneLiner}\n\n` +
+      `## Layout\n` +
+      `${top.slice(0, 8).map(([d, n]) => `- \`${d}/\` — ${n} visible files`).join('\n') || '- (empty repository)'}\n` +
+      `Entry points (INFERENCE — verify): ${eps.join(', ') || 'unknown — inspect top dirs'}\n\n` +
+      `## Commands\n` +
+      `${ctx.commands.length ? ctx.commands.map((c) => `- \`${c}\``).join('\n') : '- (agent) fill from manifests/CI after reading them'}\n` +
+      `Manifests (FACT): ${mans.join(', ') || 'none'}\n\n` +
+      `## Conventions\n` +
+      `- (agent) 3-6 high-value conventions from config + linters; follow surrounding code.\n\n` +
+      `## Danger / do not touch\n` +
+      `- (agent) load-bearing areas, generated dirs, data that must not be wiped.\n` +
+      `- Never commit unless asked. Respect .gitignore and never record secrets.\n\n` +
+      `## Config requirements\n` +
+      `- (agent) SDKs, runtimes, services, env.\n\n` +
+      `---\n` +
+      `*Project knowledge: \`.project/overview.md\` first, then \`.project/modules.md\`. Drafted by project-knowledge bootstrap v${VERSION}. Source code is authoritative; verify against source.*\n`;
     if (dryRun) created.push('AGENTS.md (root)');
     else {
-      writeFileAtomicSync(agentsPath, `# ${name} — Agent guide (project-local)\n\nThis file was bootstrapped by opencode-project-knowledge v${VERSION}. Source code is authoritative.\n\n- Read \`.project/overview.md\` + \`.project/knowledge.json\` for compact context before substantial work.\n- Load detail docs (\`architecture.md\`, \`modules.md\`, …) only for the touched subsystem.\n- Keep knowledge entries FACT / INFERENCE / UNCERTAINTY separated; never invent architecture.\n- Never commit unless asked. Respect .gitignore and never record secrets.\n`);
+      writeFileAtomicSync(agentsPath, agentsBody);
       agentsCreated = true;
     }
   }

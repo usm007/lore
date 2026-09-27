@@ -32,10 +32,13 @@ Knowledge files are an index, not the truth — **source code is always authorit
   targeted analysis → knowledge update. See `/project-knowledge-refresh`. Check staleness with
   `/project-knowledge-status`.
 - Mechanical facts are automatic and deterministic — never hand-edit them, never re-derive them:
-  `node <config>/project-knowledge/mechanical.js <repoRoot>` syncs manifest versions,
+  `node <engine>/mechanical.js <repoRoot>` (engine = installed `project-knowledge/` dir)
+  syncs manifest versions,
   test inventory, and modules.md reference health into owned marker blocks
   (`<!-- mechanical:start:<key> -->…<!-- mechanical:end:<key> -->`) plus machine fields
   in `knowledge.json`. Local triggers (git hooks + optional daily schedule):
-  `node <config>/project-knowledge/install-hooks.js <repoRoot> [--schedule]`.
+  `node <engine>/install-hooks.js <repoRoot> [--schedule]`.
+- Bootstrap new repos with `/project-knowledge-init` (`project_bootstrap` tool);
+  `templates/` holds reference skeletons only — the engine generates live docs.
 - Never document generated output (build dirs, caches, deps, user-data — see
   `knowledge.json` generated note, if present) as architecture.

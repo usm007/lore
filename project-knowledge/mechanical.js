@@ -371,12 +371,27 @@ function topLevelDirs(root) {
     .sort();
 }
 
+function gitDirFor(root) {
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync('git rev-parse --git-dir', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (out) return path.isAbsolute(out) ? out : path.join(root, out);
+  } catch { /* not a git repo or git unavailable */ }
+  return path.join(root, '.git');
+}
+
 function gitHead(root) {
   try {
-    const head = fs.readFileSync(path.join(root, '.git', 'HEAD'), 'utf8').trim();
+    const { execSync } = require('child_process');
+    const out = execSync('git rev-parse HEAD', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (out) return out.slice(0, 40);
+  } catch { /* fall back to file read */ }
+  try {
+    const gitDir = gitDirFor(root);
+    const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
     const m = head.match(/^ref:\s*(.+)$/);
     if (m) {
-      try { return fs.readFileSync(path.join(root, '.git', m[1].trim()), 'utf8').trim().slice(0, 40); }
+      try { return fs.readFileSync(path.join(gitDir, m[1].trim()), 'utf8').trim().slice(0, 40); }
       catch { return null; }
     }
     return head.slice(0, 40);
@@ -385,8 +400,7 @@ function gitHead(root) {
 
 function readVersion() {
   try {
-    const u = new URL('./VERSION', `file://${__dirname}/`.replace(/\\/g, '/'));
-    return fs.readFileSync(u, 'utf8').trim();
+    return fs.readFileSync(path.join(__dirname, 'VERSION'), 'utf8').trim();
   } catch { return '0.0.0'; }
 }
 
@@ -396,7 +410,11 @@ function upsertBlock(content, key, body) {
   const end = `<!-- mechanical:end:${key} -->`;
   const block = `${start}\n${body}\n${end}`;
   const re = new RegExp(`<!-- mechanical:start:${key} -->[\\s\\S]*?<!-- mechanical:end:${key} -->`);
-  if (re.test(content)) return { content: content.replace(re, () => block), changed: true, mode: 'replaced' };
+  const m = content.match(re);
+  if (m) {
+    if (m[0] === block) return { content, changed: false, mode: 'unchanged' };
+    return { content: content.replace(re, () => block), changed: true, mode: 'replaced' };
+  }
   const sep = content.endsWith('\n') ? '\n' : '\n\n';
   return { content: `${content}${sep}${block}\n`, changed: true, mode: 'appended' };
 }
@@ -445,13 +463,13 @@ function mechanicalInner(abs, opts = {}) {
   } catch { /* none */ }
   const genTops = new Set(generated.map((g) => String(g).replace(/\\/g, '/').split('/')[0].replace(/\/$/, '')));
   const unmapped = modulesText
-    ? dirs.filter((d) => !genTops.has(d) && !modulesText.includes(`\`${d}/\``) && !modulesText.includes(`\`${d}\``) && !modulesText.includes(d))
+    ? dirs.filter((d) => !genTops.has(d) && !modulesText.includes(`\`${d}/\``) && !modulesText.includes(`\`${d}\``))
     : dirs.filter((d) => !genTops.has(d));
 
   const actions = [];
   const changes = { docs: [], knowledgeJson: false };
 
-  const stamp = `_Deterministic sync by mechanical.js v${toolVersion} on ${today} — do not hand-edit inside markers._`;
+  const stamp = `_Deterministic sync by mechanical.js v${toolVersion} — do not hand-edit inside markers._`;
 
   // 1. overview.md — versions block
   if (versions.length) {
@@ -464,8 +482,10 @@ function mechanicalInner(abs, opts = {}) {
       const p = path.join(abs, '.project', 'overview.md');
       if (fs.existsSync(p)) {
         const r = upsertBlock(fs.readFileSync(p, 'utf8'), 'versions', body);
-        writeFileAtomicSync(p, r.content);
-        changes.docs.push(`overview.md (versions ${r.mode})`);
+        if (r.changed) {
+          writeFileAtomicSync(p, r.content);
+          changes.docs.push(`overview.md (versions ${r.mode})`);
+        }
       }
     } else {
       changes.docs.push('overview.md (versions — would write)');
@@ -475,7 +495,7 @@ function mechanicalInner(abs, opts = {}) {
   // 2. test-map.md — inventory block
   {
     const lines = [
-      `**FACT (mechanical ${today}):** ${tests.testFiles} test file(s), ~${tests.testMethodsApprox} test method(s) (regex count, approximations for BDD-style suites).`,
+      `**FACT (mechanical):** ${tests.testFiles} test file(s), ~${tests.testMethodsApprox} test method(s) (regex count, approximations for BDD-style suites).`,
     ];
     const langs = Object.entries(tests.byLang).sort((a, b) => b[1] - a[1]);
     if (langs.length) lines.push(`By extension: ${langs.map(([l, n]) => `${l} ~${n}`).join(', ')}.`);
@@ -486,8 +506,10 @@ function mechanicalInner(abs, opts = {}) {
       const p = path.join(abs, '.project', 'test-map.md');
       if (fs.existsSync(p)) {
         const r = upsertBlock(fs.readFileSync(p, 'utf8'), 'test-inventory', lines.join('\n'));
-        writeFileAtomicSync(p, r.content);
-        changes.docs.push(`test-map.md (test-inventory ${r.mode})`);
+        if (r.changed) {
+          writeFileAtomicSync(p, r.content);
+          changes.docs.push(`test-map.md (test-inventory ${r.mode})`);
+        }
       }
     } else {
       changes.docs.push('test-map.md (test-inventory — would write)');
@@ -497,7 +519,7 @@ function mechanicalInner(abs, opts = {}) {
   // 3. modules.md — reference health block
   if (refs) {
     const lines = [
-      `**FACT (mechanical ${today}):** checked ${refs.checked} path reference(s) in this file.`,
+      `**FACT (mechanical):** checked ${refs.checked} path reference(s) in this file.`,
     ];
     if (refs.missing.length) {
       lines.push(`Missing (${refs.missing.length}) — stale references needing agent review:`);
@@ -520,8 +542,10 @@ function mechanicalInner(abs, opts = {}) {
       const p = path.join(abs, '.project', 'modules.md');
       if (fs.existsSync(p)) {
         const r = upsertBlock(fs.readFileSync(p, 'utf8'), 'ref-health', lines.join('\n'));
-        writeFileAtomicSync(p, r.content);
-        changes.docs.push(`modules.md (ref-health ${r.mode})`);
+        if (r.changed) {
+          writeFileAtomicSync(p, r.content);
+          changes.docs.push(`modules.md (ref-health ${r.mode})`);
+        }
       }
     } else {
       changes.docs.push('modules.md (ref-health — would write)');
@@ -535,19 +559,37 @@ function mechanicalInner(abs, opts = {}) {
   if (!opts.dryRun) {
     cleanStaleTmpSync(path.join(abs, '.project'));
     const prev = (kj && typeof kj === 'object') ? kj : {};
-    const next = Object.assign({}, prev, {
-      baseline: { commit: gitHead(abs), timestamp: now, toolVersion },
+    const machineFields = {
       detection: { primary: detection.primary, languages: detection.languages, mixed: detection.mixed, frameworks: detection.frameworks },
       versions,
       testInventory: { date: today, testFiles: tests.testFiles, testMethodsApprox: tests.testMethodsApprox, byLang: tests.byLang },
       refHealth: refs ? { date: today, checked: refs.checked, missing: refs.missing } : { date: today, checked: 0, missing: [], note: 'modules.md absent' },
       unmappedDirs: unmapped,
-      mechanical: { updatedAt: now, toolVersion },
-    });
-    if (!fs.existsSync(path.dirname(kjPath))) fs.mkdirSync(path.dirname(kjPath), { recursive: true });
-    writeFileAtomicSync(kjPath, JSON.stringify(next, null, 2) + '\n');
-    changes.knowledgeJson = true;
-    actions.push('knowledge.json machine fields updated (user keys preserved)');
+    };
+    const sameAsPrev = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const factsUnchanged = prev.versions !== undefined &&
+      sameAsPrev(prev.versions, machineFields.versions) &&
+      sameAsPrev(prev.testInventory && { ...prev.testInventory, date: today }, machineFields.testInventory) &&
+      sameAsPrev(prev.refHealth && { ...prev.refHealth, date: today }, machineFields.refHealth) &&
+      sameAsPrev(prev.unmappedDirs, machineFields.unmappedDirs) &&
+      sameAsPrev(prev.detection, machineFields.detection);
+    if (factsUnchanged) {
+      actions.push('knowledge.json unchanged (facts identical — timestamp left intact)');
+    } else {
+      const next = Object.assign({}, prev, machineFields, {
+        baseline: {
+          commit: gitHead(abs),
+          timestamp: now,
+          toolVersion,
+          fileCount: (prev.baseline && prev.baseline.fileCount) ?? sourceFiles.length,
+        },
+        mechanical: { updatedAt: now, toolVersion },
+      });
+      if (!fs.existsSync(path.dirname(kjPath))) fs.mkdirSync(path.dirname(kjPath), { recursive: true });
+      writeFileAtomicSync(kjPath, JSON.stringify(next, null, 2) + '\n');
+      changes.knowledgeJson = true;
+      actions.push('knowledge.json machine fields updated (user keys preserved)');
+    }
   } else {
     actions.push('knowledge.json machine fields — would write (dry run)');
   }
@@ -590,4 +632,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { mechanical };
+module.exports = { mechanical, upsertBlock };

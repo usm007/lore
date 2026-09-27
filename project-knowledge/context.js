@@ -56,31 +56,30 @@ function buildContext(root, taskHint = '') {
   const decisions = readIfExists(path.join(abs, '.project', 'decisions.md'));
   const issues = readIfExists(path.join(abs, '.project', 'known-issues.md'), 1200);
 
-  const meta = (kj.data && kj.data.generated) ? kj.data : null;
   const hasKnowledge = Boolean(overview || kj.data);
   const projectName = (kj.data && (kj.data.project || kj.data.name)) || path.basename(abs);
   const version = (kj.data && kj.data.version) || null;
   const baseline = (kj.data && kj.data.baseline) || null;
+  const generatedAt = kj.data && kj.data.generatedAt;
   const baselineStamp = baseline && baseline.timestamp
     ? { at: baseline.timestamp, commit: baseline.commit || null }
-    : (meta && meta.generatedAt ? { at: meta.generatedAt, commit: null } : null);
+    : (generatedAt ? { at: generatedAt, commit: null } : null);
+
+  function ageDaysFor(stamp) {
+    const ms = Date.parse(stamp);
+    if (!Number.isFinite(ms)) return null;
+    return Math.max(0, Math.floor((Date.now() - ms) / 86400000));
+  }
 
   let freshness = 'no .project/ baseline yet (bootstrap recommended)';
   let confidence = 'low';
   if (kj.malformed) { freshness = 'knowledge.json is malformed (repair recommended)'; confidence = 'low'; }
   else if (baselineStamp) {
-    const ageMs = Date.now() - Date.parse(baselineStamp.at);
-    const ageDays = Math.max(0, Math.floor(ageMs / 86400000));
+    const ageDays = ageDaysFor(baselineStamp.at);
+    const ageBits = ageDays === null ? '(unknown age)' : `(~${ageDays}d ago)`;
     const staleCount = stale.stale.length;
     const commitBits = baselineStamp.commit ? ` @ ${String(baselineStamp.commit).slice(0, 8)}` : '';
-    freshness = `${baselineStamp.at}${commitBits} (~${ageDays}d ago)${staleCount ? `; ${staleCount} stale area(s)` : '; clean'}`;
-    confidence = staleCount > 3 ? 'medium' : 'high';
-    if (kj.data.lowConfidence && kj.data.lowConfidence.length) confidence = 'medium';
-  } else if (meta && meta.generatedAt) {
-    const ageMs = Date.now() - Date.parse(meta.generatedAt);
-    const ageDays = Math.max(0, Math.floor(ageMs / 86400000));
-    const staleCount = stale.stale.length;
-    freshness = `${meta.generatedAt} (~${ageDays}d ago)${staleCount ? `; ${staleCount} stale area(s)` : '; clean'}`;
+    freshness = `${baselineStamp.at}${commitBits} ${ageBits}${staleCount ? `; ${staleCount} stale area(s)` : '; clean'}`;
     confidence = staleCount > 3 ? 'medium' : 'high';
     if (kj.data.lowConfidence && kj.data.lowConfidence.length) confidence = 'medium';
   } else if (hasKnowledge) { freshness = 'partial knowledge (no baseline timestamp)'; confidence = 'medium'; }
@@ -101,7 +100,7 @@ function buildContext(root, taskHint = '') {
   lines.push('PROJECT CONTEXT');
   lines.push(`Project: ${projectName}${version ? ` (${version})` : ''}`);
   lines.push(`Type: ${detection.primary}${detection.mixed ? ' (mixed: ' + detection.languages.join('+') + ')' : ''}${detection.frameworks.length ? ' / ' + detection.frameworks.join(', ') : ''}`);
-  lines.push(`Architecture: ${firstLines(overview, 2) || (meta && meta.architecture) || 'see .project/architecture.md (or bootstrap)'}`);
+  lines.push(`Architecture: ${firstLines(overview, 2) || (kj.data && kj.data.architecture) || 'see .project/architecture.md (or bootstrap)'}`);
   lines.push(`Relevant subsystem: ${relevant}`);
   lines.push(`Relevant modules: ${firstLines(modules, 3) || 'see .project/modules.md'}`);
   lines.push(`Important constraints: ${firstLines(readIfExists(path.join(abs, '.project', 'conventions.md')), 2) || 'see .project/conventions.md'}`);

@@ -29,13 +29,24 @@ const ENGINE_DIR = __dirname;
 const HOOK_NAMES = ['post-commit', 'post-merge', 'post-checkout'];
 const MARKER = 'opencode-project-knowledge local automation';
 
+function gitDirFor(root) {
+  try {
+    const out = execSync('git rev-parse --git-dir', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (out) return path.isAbsolute(out) ? out : path.join(root, out);
+  } catch { /* not a git repo or git unavailable */ }
+  return path.join(root, '.git');
+}
+
 function hookBody(engineDir, root) {
-  const eng = engineDir.replace(/"/g, '');
-  const rt = root.replace(/"/g, '');
+  const nodeExe = process.execPath;
+  const esc = (s) => String(s).replace(/\\/g, '/').replace(/"/g, '');
+  const eng = esc(engineDir);
+  const rt = esc(root);
+  const nodeEsc = esc(nodeExe);
   const inner = process.platform === 'win32'
     // Git for Windows executes hooks via sh.exe (shebang required); delegate to powershell for node.
-    ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path '.project') { try { & node \\"${eng}/mechanical.js\\" \\"${rt}\\" --quiet } catch {}; try { & node \\"${eng}/refresh.js\\" \\"${rt}\\" --mark-only } catch {} }"`
-    : `node "${eng}/mechanical.js" "${rt}" --quiet >/dev/null 2>&1 || true\nnode "${eng}/refresh.js" "${rt}" --mark-only >/dev/null 2>&1 || true`;
+    ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "if (Test-Path '.project') { try { & \\"${nodeEsc}\\" \\"${eng}/mechanical.js\\" \\"${rt}\\" --quiet } catch {}; try { & \\"${nodeEsc}\\" \\"${eng}/refresh.js\\" \\"${rt}\\" --mark-only } catch {} }"`
+    : `"${nodeEsc}" "${eng}/mechanical.js" "${rt}" --quiet >/dev/null 2>&1 || true\n"${nodeEsc}" "${eng}/refresh.js" "${rt}" --mark-only >/dev/null 2>&1 || true`;
   return `#!/bin/sh\n# ${MARKER} (installed ${new Date().toISOString()} - local only, safe to delete)\n` +
     `[ -d ".project" ] || exit 0\n` +
     `${inner} >/dev/null 2>&1 || true\n` +
@@ -48,13 +59,15 @@ function isOurs(p) {
 }
 
 function installHooks(root) {
-  const hooksDir = path.join(root, '.git', 'hooks');
-  if (!fs.existsSync(path.join(root, '.git'))) {
-    return { installed: [], skipped: 'no .git directory (not a git repo)' };
+  const gitDir = gitDirFor(root);
+  const hooksDir = path.join(gitDir, 'hooks');
+  if (!fs.existsSync(gitDir)) {
+    return { installed: [], skipped: 'no git directory (not a git repo or worktree gitdir unresolved)' };
   }
   if (!fs.existsSync(hooksDir)) fs.mkdirSync(hooksDir, { recursive: true });
   const installed = [];
   const chained = [];
+  const skipped = [];
   for (const name of HOOK_NAMES) {
     const p = path.join(hooksDir, name);
     if (fs.existsSync(p) && !isOurs(p)) {
@@ -64,20 +77,21 @@ function installHooks(root) {
       const fragment = ours.split('\n').filter((l) => !/^#!/.test(l) && !l.startsWith('# ') && l.trim() !== 'exit 0').join('\n');
       const chainedBody = prev.replace(/\s+$/, '') +
         `\n\n# --- ${MARKER}: chained after pre-existing hook ---\n` + fragment + '\n';
-      fs.copyFileSync(p, `${p}.pk-bak`);
+      if (!fs.existsSync(`${p}.pk-bak`)) fs.copyFileSync(p, `${p}.pk-bak`);
       fs.writeFileSync(p, chainedBody, { mode: 0o755 });
       chained.push(name);
+    } else if (fs.existsSync(p) && isOurs(p) && fs.readFileSync(p, 'utf8').includes('chained after pre-existing hook')) {
+      skipped.push(name);
     } else {
       fs.writeFileSync(p, hookBody(ENGINE_DIR, root), { mode: 0o755 });
       installed.push(name);
     }
   }
-  try { execFileSync('git', ['config', 'core.hooksPath', '.git/hooks'], { cwd: root, stdio: 'ignore' }); } catch { /* optional */ }
-  return { installed, chained };
+  return { installed, chained, skipped };
 }
 
 function uninstallHooks(root) {
-  const hooksDir = path.join(root, '.git', 'hooks');
+  const hooksDir = path.join(gitDirFor(root), 'hooks');
   const removed = [];
   const restored = [];
   const kept = [];

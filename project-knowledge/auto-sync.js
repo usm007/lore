@@ -62,11 +62,11 @@ function findRunner() {
 }
 
 function agentPrompt(root) {
-  return `Project-knowledge unattended refresh for ${root}. ` +
+  return `Project-knowledge unattended refresh for "${root}". ` +
     `Run /project-knowledge-refresh strictly scoped to modules marked stale in ` +
     `.project/state/stale.json (targeted edits only, keep FACT/INFERENCE/UNCERTAINTY ` +
     `labels, never touch source code, never commit). ` +
-    `When done, run node ${ENGINE_DIR}/refresh.js ${root} --clear for the modules you resolved. ` +
+    `When done, run node "${ENGINE_DIR}/refresh.js" "${root}" --clear for the modules you resolved. ` +
     `Reply with a one-line summary per updated file.`;
 }
 
@@ -79,7 +79,8 @@ function autoSync(root, opts = {}) {
   }
   // No parent lock: each stage takes its own (mechanical/refresh/bootstrap all
   // lock internally). Holding one lock while spawning children deadlocks.
-  // Agent-pass double-spend is prevented by a sentinel file instead.
+  // Agent-pass double-spend is prevented by a sentinel file claimed under a
+  // short lock (see autoSyncInner).
   return autoSyncInner(abs, opts);
 }
 
@@ -133,21 +134,37 @@ function autoSyncInner(abs, opts = {}) {
     agent = { ran: false, reason: 'nothing marked stale — deterministic stages were enough' };
     steps.push('agent pass skipped (clean)');
   } else {
-    const prior = !opts.dryRun && !opts.forceAgent ? sentinelActive(abs, 4 * 3600 * 1000) : null;
-    if (prior) {
-      agent = { ran: false, reason: `recent agent run in progress (started ${prior.startedAt}) — skipping to avoid double-spend` };
+    const { writeFileAtomicSync, withLockSync } = require('./atomic');
+    const claimSentinel = () => withLockSync(
+      path.join(abs, '.project', 'agent-run.lock'),
+      () => {
+        if (!opts.forceAgent && sentinelActive(abs, 4 * 3600 * 1000)) return false;
+        if (opts.dryRun) return true;
+        writeFileAtomicSync(agentSentinel(abs), JSON.stringify({ startedAt: new Date().toISOString(), done: false }, null, 2) + '\n');
+        return true;
+      },
+      { timeoutMs: 15000 },
+    );
+    let claimed = false;
+    try { claimed = !opts.dryRun && !opts.forceAgent ? claimSentinel() : true; }
+    catch { claimed = false; }
+    if (!claimed) {
+      const prior = sentinelActive(abs, 4 * 3600 * 1000);
+      agent = { ran: false, reason: `recent agent run in progress (started ${prior && prior.startedAt}) — skipping to avoid double-spend` };
       steps.push('agent pass skipped (sentinel active)');
     } else {
       const runner = findRunner();
       if (!runner) {
+        if (!opts.dryRun) { try { fs.unlinkSync(agentSentinel(abs)); } catch { /* retry next time */ } }
         agent = { ran: false, reason: 'no headless `opencode run` runner found — left for next interactive session' };
         steps.push('agent pass skipped (no runner)');
       } else if (opts.dryRun) {
         agent = { ran: true, reason: null, dry: true };
         steps.push(`agent pass (would run: ${runner.cmd} run "<refresh prompt>")`);
       } else {
-        const { writeFileAtomicSync } = require('./atomic');
-        writeFileAtomicSync(agentSentinel(abs), JSON.stringify({ startedAt: new Date().toISOString(), done: false }, null, 2) + '\n');
+        if (opts.forceAgent) {
+          writeFileAtomicSync(agentSentinel(abs), JSON.stringify({ startedAt: new Date().toISOString(), done: false }, null, 2) + '\n');
+        }
         try {
           const out = execFileSync(runner.cmd, [...runner.args, agentPrompt(abs)],
             { cwd: abs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
